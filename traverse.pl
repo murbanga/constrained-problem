@@ -49,19 +49,92 @@ validate([Path|Tail]) :-
 traverse(X, Y, [Y]) :- link(X, Y).
 traverse(X, Y, [Z|Tail]) :- link(X, Z), traverse(Z, Y, Tail).
 
+call_graph(Beg, Beg, [Beg]).
+
+call_graph(Beg, End, [End, Next]) :-
+    bagof(Z, link(Z, End), [Prev]),
+    call_graph(Beg, Prev, Next).
+
+call_graph(Beg, End, [End, NextA, NextB]) :-
+    bagof(Z, link(Z, End), [PrevA, PrevB]),
+    % go left first
+    call_graph(Beg, PrevA, NextA),
+    call_graph(Beg, PrevB, NextB).
+
+call_graph(Beg, End, [End, NextA, NextB]) :-
+    bagof(Z, link(Z, End), [PrevA, PrevB]),
+    % go right first
+    call_graph(Beg, PrevB, NextA),
+    call_graph(Beg, PrevA, NextB).
+    
+call_graph(_, End, _) :-
+    bagof(Z, link(Z, End), Prev), length(Prev, N), N > 2, writef("too many descendants %p", [N]), false.
+
+
+% livetime([], _, _, []).
+
+% livetime([[Node|Tail]|Tail2], N, A, Live) :-
+%     livetime([Node|Tail], N + 1, A, Live),
+%     livetime(Tail2, N, A, Live).
+
+% livetime([A|Tail], N, A, [R|Tail2]) :-
+%     R is N,
+%     writef("%p at %p\n", [A, R]),
+%     livetime(Tail, N, A, Tail2).
+
+% livetime([X|Tail], N, A, Live) :-
+%     % (X = A ->
+%     %     (
+%     %         H is N,
+%     %         writef("%p at %p\n", [A, H])
+%     %     );
+%     %     (H is -1)),
+%     \+ X = A,
+%     writef("mismatch %p\n", [X]),
+%     livetime(Tail, N, A, Live).
+
+% livetime([Node|Tail], Depth, A, Lives) :-
+
+counter(A, Depth, A, [Depth]) :- writef("found %p at %p\n", [A, Depth]).
+counter(X, _, A, []) :- \+ X = A.
+
+livetime([], _, _, []).
+
+livetime([X], Depth, A, [H|Entries]) :-
+    counter(X, Depth, A, H).
+
+livetime([X,[First]|Tail], Depth, A, [H|Entries]) :-
+    writef("trying %p\n", X),
+    counter(X, Depth, A, H),
+    livetime(First, Depth + 1, A, Entries),
+    livetime(Tail, Depth + 1, A, Entries).
+
+livetimes(_, [], []).
+livetimes(CallTree, [Node|Nodes], [Live|Lives]) :-
+    livetime(CallTree, 1, Node, Live),
+    livetimes(CallTree, Nodes, Lives).
+
+% setup_livetimes([],[]).
+% setup_livetimes([_|H],[[0,10]|P]) :- setup_livetimes(H,P).
+
+write_lists([]).
 write_lists([H|T]) :- writeln(H), write_lists(T).
 
 :- initialization(main, main).
 
 main(_) :-
-    writeln("hey"),
     start_node(Begin),
     end_node(End),
     writef("start %p\nend %p\n", [Begin, End]),
-    findall(X, traverse(Begin, End, X), B),
+    findall(X, call_graph(Begin, End, X), B),
     length(B, Blength),
     writef("found %p solution(s)\n", [Blength]),
-    maplist([X,Y]>>append([Begin],X,Y), B, Bfull),
-    write_lists(Bfull),
-    validate(Bfull),
+    write_lists(B),
+    findall(N, (link(N, _);link(_,N)), AllNodes), sort(AllNodes, UniqueNodes),
+    %setup_livetimes(SortedAllNodes, Livetimes),
+    %writeln(Livetimes),
+    maplist([X]>>(livetimes(X, UniqueNodes, Livetimes), writeln(Livetimes)), B),
+    %write(Dict),
+    %maplist([X,Y]>>append([Begin],X,Y), B, Bfull),
+    %validate(Bfull),
     writeln("done").
