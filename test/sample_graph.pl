@@ -13,6 +13,10 @@ link(nodeE, nodeF).
 link(nodeA, nodeF).
 link(nodeF, nodeG).
 
+link(nodeA1, nodeB1).
+link(nodeB1, nodeC1).
+link(nodeC1, nodeD1).
+
 op_type(nodeA, "Read").
 op_type(nodeB, "RecogniConv2DFused").
 op_type(nodeC, "RecogniConv2DFused").
