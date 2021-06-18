@@ -46,6 +46,8 @@ validate([Path|Tail]) :-
     validate_path(Path),
     validate(Tail).
 
+weight(A, N) :- input_size(A, [W,H,D]), N is W*H*D.
+
 traverse(X, Y, [Y]) :- link(X, Y).
 traverse(X, Y, [Z|Tail]) :- link(X, Z), traverse(Z, Y, Tail).
 
@@ -68,54 +70,48 @@ call_graph(Beg, End, [End, NextA, NextB]) :-
     call_graph(Beg, PrevA, NextB).
     
 call_graph(_, End, _) :-
-    bagof(Z, link(Z, End), Prev), length(Prev, N), N > 2, writef("too many descendants %p", [N]), false.
+    bagof(Z, link(Z, End), Prev), length(Prev, N), N > 2,
+        writef("too many descendants %p for node %p\n", [N, End]), false.
 
+flatten(A, A, [A]).
 
-% livetime([], _, _, []).
+flatten(A, B, [B|Rest]) :-
+    bagof(Z, link(Z, B), [C]),
+    flatten(A, C, Rest).
 
-% livetime([[Node|Tail]|Tail2], N, A, Live) :-
-%     livetime([Node|Tail], N + 1, A, Live),
-%     livetime(Tail2, N, A, Live).
+flatten(A, B, [B|Rest]) :-
+    bagof(Z, link(Z, B), [C,D]),
+    flatten(A, C, RestC),
+    flatten(A, D, RestD),
+    append(RestC, RestD, Rest).
 
-% livetime([A|Tail], N, A, [R|Tail2]) :-
-%     R is N,
-%     writef("%p at %p\n", [A, R]),
-%     livetime(Tail, N, A, Tail2).
+flatten(A, B, [B|Rest]) :-
+    bagof(Z, link(Z, B), [C,D]),
+    flatten(A, C, RestC),
+    flatten(A, D, RestD),
+    append(RestD, RestC, Rest).
 
-% livetime([X|Tail], N, A, Live) :-
-%     % (X = A ->
-%     %     (
-%     %         H is N,
-%     %         writef("%p at %p\n", [A, H])
-%     %     );
-%     %     (H is -1)),
-%     \+ X = A,
-%     writef("mismatch %p\n", [X]),
-%     livetime(Tail, N, A, Live).
+livetimes(Beg, Beg, []) :- writef("%p\ndone\n", [[Beg]]).
 
-% livetime([Node|Tail], Depth, A, Lives) :-
+livetimes(Beg, Beg, [Dep|Deps]) :-
+    livetimes(Beg, Dep, Deps).
 
-counter(A, Depth, A, [Depth]) :- writef("found %p at %p\n", [A, Depth]).
-counter(X, _, A, []) :- \+ X = A.
+livetimes(Beg, End, OldDeps) :-
+    % need only Prev to compute End,
+    % in a next level End is no longer needed
+    bagof(Z, link(Z, End), [Prev]),
+    append([End, Prev], OldDeps, L),
+    writef("%p\n", [L]),
+    delete(OldDeps, End, WithoutEnd),
+    livetimes(Beg, Prev, WithoutEnd).
 
-livetime([], _, _, []).
-
-livetime([X], Depth, A, [H|Entries]) :-
-    counter(X, Depth, A, H).
-
-livetime([X,[First]|Tail], Depth, A, [H|Entries]) :-
-    writef("trying %p\n", X),
-    counter(X, Depth, A, H),
-    livetime(First, Depth + 1, A, Entries),
-    livetime(Tail, Depth + 1, A, Entries).
-
-livetimes(_, [], []).
-livetimes(CallTree, [Node|Nodes], [Live|Lives]) :-
-    livetime(CallTree, 1, Node, Live),
-    livetimes(CallTree, Nodes, Lives).
-
-% setup_livetimes([],[]).
-% setup_livetimes([_|H],[[0,10]|P]) :- setup_livetimes(H,P).
+livetimes(Beg, End, OldDeps) :-
+    % need PrevA and PrevB to compute End
+    bagof(Z, link(Z, End), [PrevA, PrevB]),
+    append([End, PrevA, PrevB], OldDeps, L),
+    writef("%p\n", [L]),
+    delete(OldDeps, End, WithoutEnd),
+    (livetimes(Beg, PrevA, [PrevB|WithoutEnd]), livetimes(Beg, PrevB, [PrevA|WithoutEnd])).
 
 write_lists([]).
 write_lists([H|T]) :- writeln(H), write_lists(T).
@@ -133,7 +129,7 @@ main(_) :-
     findall(N, (link(N, _);link(_,N)), AllNodes), sort(AllNodes, UniqueNodes),
     %setup_livetimes(SortedAllNodes, Livetimes),
     %writeln(Livetimes),
-    maplist([X]>>(livetimes(X, UniqueNodes, Livetimes), writeln(Livetimes)), B),
+    %maplist([X]>>(livetimes(X, UniqueNodes, Livetimes), writeln(Livetimes)), B),
     %write(Dict),
     %maplist([X,Y]>>append([Begin],X,Y), B, Bfull),
     %validate(Bfull),
