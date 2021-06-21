@@ -91,38 +91,61 @@ flatten(A, B, [B|Rest]) :-
     flatten(A, D, RestD),
     append(RestD, RestC, Rest).
 
+
 delete_one(_, [], []).
 delete_one(Term, [Term|Tail], Tail) :- !.
 delete_one(Term, [Head|Tail], [Head|Result]) :-
     delete_one(Term, Tail, Result).
 
+
 can_compute([], Buffers, Buffers). 
 can_compute([Node|Tail], Buffers, Leftovers) :-
-    (member(Node, Buffers) -> true; writef("buffer %p required in %p\n", [Node, Buffers]), false),
+    member(Node, Buffers), % -> true; writef("buffer %p required in %p\n", [Node, Buffers]), false),
     delete_one(Node, Buffers, L),
     can_compute(Tail, L, Leftovers).
 
-compute([], L, L).
-compute([Next|Tail], Buffers, [Next|Leftovers]) :-
+
+compute([], L, L, []).
+
+compute([Next|Tail], Buffers, [Next|Leftovers], [Next|ComputedTargets]) :-
     bagof(X, link(X, Next), Prevs),
     can_compute(Prevs, Buffers, L),
-    compute(Tail, L, Leftovers),
-    writef("computed %p\n", Next).
+    %writef("computing %p, leftovers %p\n", [Next, L]),
+    compute(Tail, L, Leftovers, ComputedTargets).
 
-populate(X, 0, []).
+compute([Next|Tail], Buffers, Leftovers, ComputedTargets) :-
+    bagof(X, link(X, Next), Prevs),
+    \+ can_compute(Prevs, Buffers, _),
+    %writef("can not compute %p right now, bufs %p required in %p\n", [Next, Prevs, Buffers]),
+    compute(Tail, Buffers, Leftovers, ComputedTargets).
+
+
+populate(_, 0, []).
 populate(X, N, [X|T]) :- N > 0, M is N-1, populate(X, M, T).
 
-livetimes(Beg, End, [], L) :-
-    \+ link(_, Beg),
-    writef("starting with %p\n", [Beg]),
-    bagof(X, link(Beg, X), Desc),
-    length(Desc, NumDesc),
-    populate(Beg, NumDesc, M),
-    livetimes(Beg, End, M, L).
+livetimes_list([], _, _).
+livetimes_list([End], End, [End]) :- writeln("done").
+livetimes_list([H|T], End, Buffers) :-
+    livetimes(H, End, Buffers, L),
+    livetimes_list(T, End, L).
 
+%livetimes(Beg, End, [], L) :-
+%    \+ link(_, Beg),
+%    writef("starting with %p\n", [Beg]),
+%    bagof(X, link(Beg, X), Desc),
+%    length(Desc, NumDesc),
+%    populate(Beg, NumDesc, M),
+%    livetimes(Beg, End, [], L).
+
+livetimes(Beg, Beg, _, _).
 livetimes(Beg, End, Buffers, L) :-
     bagof(X, link(Beg, X), Nexts),
-    compute(Nexts, Buffers, L).
+    length(Nexts, NumNexts), N is NumNexts-1,
+    populate(Beg, N, M),
+    append(M, Buffers, Merged),
+    compute(Nexts, Merged, L, T),
+    writef("live buffers %p\n", [L]),
+    livetimes_list(T, End, L).
 
 write_lists([]).
 write_lists([H|T]) :- writeln(H), write_lists(T).
