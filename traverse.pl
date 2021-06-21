@@ -23,24 +23,38 @@ type_supported(A) :- op_type(A, Type), type_supported(A, Type).
 
 weight(A, N) :- input_size(A, [W,H,D]), N is W*H*D.
 
+total_weight([], 0).
+total_weight([H|T], W) :-
+    total_weight(T, TW),
+    weight(H, HW),
+    W is HW + TW.
+
+% delete_one(+Item, +List1, -List2)
+% Removes one entry of Item from List1
 delete_one(_, [], []).
 delete_one(Term, [Term|Tail], Tail) :- !.
 delete_one(Term, [Head|Tail], [Head|Result]) :-
     delete_one(Term, Tail, Result).
 
+% delete_every_from(+List1, +List2, -List3)
+% Removes all entries presented in List1, from List2
 delete_every_from([], L, L).
 delete_every_from([H|T], L, Out) :-
     delete_one(H, L, M),
     delete_every_from(T, M, Out).
 
 
+% compute(+Nodes, +Buffers, +UnusedBuffers, +Targets)
 compute([], L, L, []).
 
 compute([Next|Tail], Buffers, Leftovers, [Next|ComputedTargets]) :-
     bagof(X, link(X, Next), Prevs),
     intersection(Prevs, Buffers, Prevs),
+
     sort([Next|Buffers], LiveBuffers),
-    writef("live buffers %p\n", [LiveBuffers]),
+    total_weight(LiveBuffers, W),
+    writef("calc %p, live buffers %p, %p\n", [Next, LiveBuffers, W]),
+    
     delete_every_from(Prevs, Buffers, L),
     %NewBuffers = [Next|L],
     %writef("output %p, unused buffers %p\n", [Next, L]),
@@ -64,27 +78,25 @@ link_heads_to(Beg, End, X) :-
 
 
 livetimes_list([], _, L, L).
-livetimes_list([End], End, [End], [End]) :- writeln("done").
-livetimes_list([H|T], End, Buffers, Leftovers) :-
+livetimes_list([End], End, [End], [End]). % :- writeln("done").
+livetimes_list([Beg|Tail], End, Buffers, FinalLeftovers) :-
     %writef("livetimes_list %p %p %p\n", [[H|T], End, Buffers]),
-    livetimes_interim(H, End, Buffers, L),
-    livetimes_list(T, End, L, Leftovers).
-
-livetimes_interim(Beg, Beg, _, _).
-livetimes_interim(Beg, End, Buffers, Leftovers) :-
     bagof(X, link_heads_to(Beg, End, X), NextsUnsorted), sort(NextsUnsorted, Nexts),
+    %permutation(Nexts, VaryNexts),
     length(Nexts, N), NumNexts is N - 1,
     populate(Beg, NumNexts, M),
     append(M, Buffers, Merged),
-    compute(Nexts, Merged, L, T),
-    %writef("live buffers %p\n", [L]),
-    livetimes_list(T, End, L, Leftovers).
-
+    compute(Nexts, Merged, L, Targets),
+    livetimes_list(Targets, End, L, Leftovers),
+    livetimes_list(Tail, End, Leftovers, FinalLeftovers).
 
 livetimes(Beg, End) :-
-    writef("input %p\n", [[Beg]]),
-    livetimes_interim(Beg, End, [Beg], L),
-    writef("output %p\n", [L]).
+    weight(Beg, BegW),
+    writef("input %p, %p\n", [[Beg], BegW]),
+    livetimes_list([Beg], End, [Beg], L),
+    L = [End],
+    weight(End, EndW),
+    writef("output %p, %p\n", [L, EndW]).
 
 
 write_lists([]).

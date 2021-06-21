@@ -12,6 +12,7 @@ link(nodeD, nodeE).
 link(nodeE, nodeF).
 link(nodeA, nodeF).
 link(nodeF, nodeG).
+% link(node0, nodeB).
 
 link(nodeA1, nodeB1).
 link(nodeB1, nodeC1).
