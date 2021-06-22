@@ -1,6 +1,6 @@
 import collections
 
-Graph = collections.namedtuple("Graph", ["con", "props"])
+Graph = collections.namedtuple("Graph", ["con", "rev", "props"])
 Geom = collections.namedtuple("Geom", ["output_size", "padding"])
 
 
@@ -26,7 +26,19 @@ def get_sample_graph():
     props["G"] = Geom([64, 32, 1], [0, 0])
     props["H"] = Geom([64, 32, 1], [0, 0])
 
-    return Graph(con=con, props=props)
+    return Graph(con=con, rev=reverse_connections(con), props=props)
+
+
+def reverse_connections(con: dict):
+    rev = {}
+    for n in con:
+        nexts = con[n]
+        for next in nexts:
+            if next in rev:
+                rev[next].append(n)
+            else:
+                rev[next] = [n]
+    return rev
 
 
 def load_graph(filename):
