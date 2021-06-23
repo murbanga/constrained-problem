@@ -5,8 +5,30 @@ from typing import Iterable
 from sample_graph import get_sample_graph, Geom, Graph
 
 Live = collections.namedtuple("Live", ["op", "bufs"])
-Chunk = collections.namedtuple("Chunk", ["beg", "end"])
-Op = collections.namedtuple("Op", ["type", "name", "beg", "end"])
+
+
+class Op:
+    def __init__(self, type, name, chunk, buffers):
+        self.type = type
+        self.name = name
+        self.beg = chunk.beg
+        self.end = chunk.end
+        assert check_buffers_integrity(buffers)
+        self.bufs = copy.deepcopy(buffers)
+
+    def __repr__(self):
+        return f"Op({self.type},{self.name},{self.beg},{self.end},{self.bufs})"
+
+
+class Chunk:
+    def __init__(self, ref, beg, end):
+        assert beg < end
+        self.ref = ref
+        self.beg = beg
+        self.end = end
+
+    def __repr__(self):
+        return f"Chunk({self.ref},{self.beg},{self.end})"
 
 
 def input_shape(g: Geom):
@@ -63,12 +85,8 @@ def apply_operation(op, buffers):
 
 
 def compute(graph: Graph, buffers: list, start: str, end: str):
-    inputs = []
-    # FIXME
-    if start not in graph.rev:
-        inputs = ["input"]
-    else:
-        inputs = graph.rev[start]
+
+    inputs = graph.rev[start]
 
     if not contains(inputs, buffers):
         # print(f"can not compute {start}, bufs {inputs} missing in {buffers}")
@@ -147,109 +165,237 @@ def find_paths(graph: Graph, start: str, end: str):
     buffers = ["input"]
     assert "input" not in graph.props
     graph.props["input"] = Geom(input_shape(graph.props[start]), [])
+    assert start not in graph.rev
+    graph.rev[start] = ["input"]
 
     seq = compute(graph, buffers, start, end)
 
     return unique(flatten(seq))
 
 
-def binary_chopper(n: int, chunk: Chunk):
+def binary_chopper(n: int, chunk: Chunk, min_size):
     if n > 0:
-        if chunk.end - chunk.beg < 2:
+        middle = (chunk.end + chunk.beg) // 2
+        if chunk.end - middle < min_size or middle - chunk.beg < min_size:
             yield chunk
         else:
-            middle = (chunk.end + chunk.beg) // 2
-            yield from binary_chopper(n - 1, Chunk(chunk.beg, middle))
-            yield from binary_chopper(n - 1, Chunk(middle, chunk.end))
+            yield from binary_chopper(
+                n - 1, Chunk(chunk.ref, chunk.beg, middle), min_size
+            )
+            yield from binary_chopper(
+                n - 1, Chunk(chunk.ref, middle, chunk.end), min_size
+            )
     else:
         yield chunk
 
 
-def sequence_cost(seq: list):
-    cost = len(seq)
-    load_ops = 0
-    save_ops = 0
-    for op in seq:
-        if op.name == "load":
-            load_ops += 1
-        elif op.name == "save":
-            save_ops += 1
-
-    return cost + load_ops + save_ops
+def memory_size(graph, buffers):
+    size = 0
+    for b in buffers:
+        for chunk in buffers[b]:
+            size += chunk_size(graph.props[b], chunk)
+    return size
 
 
-def fragmented_compute(graph, path, chunks, offline_chunks, max_mem_size, chopper):
+def deref(inputs, chunk, buffers):
+    for i in inputs:
+        if chunk is None:
+            for c in buffers[i]:
+                c.ref -= 1
+        else:
+            for c in buffers[i]:
+                if c.beg == chunk.beg and c.end == chunk.end:
+                    c.ref -= 1
+                    break
+
+        buffers[i] = [c for c in buffers[i] if c.ref > 0]
+
+
+def check_buffers_integrity(buffers):
+    for node in buffers:
+        for a in buffers[node]:
+            for b in buffers[node]:
+                if a != b:
+                    if (a.beg <= b.beg and b.beg < a.end) or (
+                        a.beg < b.end and b.end <= a.end
+                    ):
+                        print(
+                            f"integrity failure: chunks {node} [{a.beg},{a.end}] overlap with [{b.beg},{b.end}]"
+                        )
+                        return False
+    return True
+
+
+def fragmented_compute(
+    graph,
+    path,
+    buffers,
+    offline_buffers,
+    max_mem_size,
+    max_partitions=4,
+    chopper=binary_chopper,
+):
+    if len(path) == 0 or path[0].op == "END":
+        return ([], buffers)
+
     op = path[0].op
+    inputs = graph.rev[op]
+    mem_size = memory_size(graph, buffers)
+    assert mem_size <= max_mem_size
+    assert check_buffers_integrity(buffers)
 
-    if op == "END":
-        return []
+    # check that all input chunks have same sizes
+    validate_inputs = set()
+    for i in inputs:
+        validate_inputs.add(str(buffers[i]))
+    if len(validate_inputs) > 1:
+        return (None, buffers)
 
-    seq = []
+    # assert contains(inputs, set(buffers.keys()).union(set(offline_buffers.keys())))
 
-    mem_size = 0
-    for b in path[0].bufs:
-        if b == op:
-            assert b not in chunks
+    output_ref = len(graph.con[op]) if op in graph.con else 1
+    output_pad = graph.props[op].padding[0]
+
+    input_chunks = buffers[inputs[0]]
+
+    buffers_backup = copy.deepcopy(buffers)
+
+    # attempt 1: try to compute all chunks at once
+    output_chunks = []
+    for input_chunk in input_chunks:
+        if input_chunk.end - input_chunk.beg < output_pad + 1:
+            return (None, buffers_backup)
+        output_chunks.append(
+            Chunk(output_ref, input_chunk.beg, input_chunk.end - output_pad)
+        )
+
+    output_size = 0
+    for c in output_chunks:
+        output_size += chunk_size(graph.props[op], c)
+
+    offline_input_chunks = 0
+    ld_seq = []
+    for i in inputs:
+        if i in offline_buffers:
+            for c in offline_buffers[i]:
+                offline_input_chunks += chunk_size(graph.props[i], c)
+                ld_seq.append(Op("ld", i, c))
+
+    if mem_size + output_size + offline_input_chunks <= max_mem_size:
+        # there is enough memory to process all input chunks
+        seq = []
+
+        buffers[op] += output_chunks
+
+        for c in output_chunks:
+            seq.append(Op("op", op, c, buffers))
+
+        deref(inputs, None, buffers)
+
+        sub_seq, buffers = fragmented_compute(
+            graph,
+            path[1:],
+            buffers,
+            offline_buffers,
+            max_mem_size,
+            max_partitions,
+            chopper,
+        )
+        if sub_seq != None:
+            # solutions.append(ld_seq + seq + sub_seq)
+            return (ld_seq + seq + sub_seq, buffers)
         else:
-            if b not in chunks:
-                chunks[b] = offline_chunks[b]
-                del offline_chunks[b]
-                seq.append(Op("load", b, chunks[b].beg, chunks[b].end))
-            mem_size += chunk_size(graph.props[b], chunks[b])
+            buffers = copy.deepcopy(buffers_backup)
 
-    # unused_bufs = set(path[0].bufs.keys()).difference(set(graph.rev[op].keys()))
+    # attempt 2: recursively compute chunks one by one
+    partitions = 0
+    while partitions < max_partitions:
+        failed = False
+        running_mem_size = mem_size
+        seq = []
+        for input_chunk in input_chunks:
+            for input_sub_chunk in chopper(
+                partitions, input_chunk, max(1, output_pad + 1)
+            ):
+                output_chunk = Chunk(
+                    output_ref, input_sub_chunk.beg, input_sub_chunk.end - output_pad
+                )
+                output_size = chunk_size(graph.props[op], output_chunk)
+                if running_mem_size + output_size <= max_mem_size:
+                    buffers[op].append(output_chunk)
 
-    # assume all inputs have same size
-    if op not in graph.rev:
-        input_chunk = chunks["input"]
-    else:
-        for input in graph.rev[op]:
-            input_chunk = chunks[input]
-            break
+                    seq.append(Op("op", op, output_chunk, buffers))
 
-    pad = graph.props[op].padding[0]
-    allocation_succeed = False
+                    if partitions == 0:
+                        deref(inputs, input_chunk, buffers)
 
-    while not allocation_succeed:
-        output_chunk = Chunk(input_chunk.beg, input_chunk.end - pad)
-        mem_size += chunk_size(graph.props[op], output_chunk)
+                    sub_seq, buffers = fragmented_compute(
+                        graph,
+                        path[1:],
+                        buffers,
+                        offline_buffers,
+                        max_mem_size,
+                        max_partitions,
+                        chopper,
+                    )
+                    if sub_seq is None:
+                        failed = True
+                        break
+                    running_mem_size = memory_size(graph, buffers)
+                    seq += sub_seq
+                else:
+                    failed = True
+                    break
 
-        if mem_size > max_mem_size:
-            # we have three options here:
-            # 1. reduce the chunk size
-            # 2. unload some chunk that does not required now
-            # 3. fail, so that previous operator try to reduce memory usage
-            # continue
-            pass
+            if failed:
+                break
 
-        if len(path) > 0:
-            ret = fragmented_compute(
-                graph,
-                path[1:],
-                {**chunks, op: output_chunk},
-                {**offline_chunks},
-                max_mem_size,
-                chopper,
-            )
-            # if ret is None:
-            #    continue
+            if partitions > 0:
+                deref(inputs, input_chunk, buffers)
+
+        if not failed:
+            # solutions.append(seq)
+            return (seq, buffers)
         else:
-            # reach end of compute sequence and did not run out of memory
-            return []
-        allocation_succeed = True
-    return None
+            buffers = copy.deepcopy(buffers_backup)
+
+        partitions += 1
+
+    # attempt 3: unload unused tensors and try again
+    # unused_tensors = set(buffers.keys()).difference(set(inputs))
+    # if len(unused_tensors) > 0:
+    #     seq = []
+    #     for t in unused_tensors:
+    #         for b in buffers[t]:
+    #             seq.append(Op("st", t, b.beg, b.end))
+    #         offline_buffers[t] += buffers[t]
+    #         del buffers[t]
+    #     sub_seq = fragmented_compute(
+    #         graph, path, buffers, offline_buffers, max_mem_size, max_partitions, chopper
+    #     )
+    #     if sub_seq is not None:
+    #         solutions.append(seq + sub_seq)
+
+    # buffers = copy.deepcopy(back_buffers)
+    return (None, buffers_backup)
 
 
 def minimize_compute(graph: Graph, path: list, max_mem_size: int, max_iter: int):
     input_sz = input_shape(graph.props[path[0].op])
-    offline_chunks = {"input": Chunk(0, input_sz[0])}
-    chunks = {}
-    sequence = fragmented_compute(
+    chunks = {"input": [Chunk(1, 0, input_sz[0])]}
+    offline_chunks = {}
+
+    for p in path:
+        chunks[p.op] = []
+        offline_chunks[p.op] = []
+
+    sequence, buffers = fragmented_compute(
         graph,
         path,
         chunks,
         offline_chunks,
         max_mem_size,
+        max_iter,
         binary_chopper,
     )
     return None
@@ -275,14 +421,14 @@ def print_seq(graph, seq):
 
 config = {
     "max_memory_size": 10 * 1024,
-    "max_iterations": 100,
+    "max_iterations": 4,
 }
 
 graph = get_sample_graph()
 if not verify(graph):
     exit(1)
 
-paths = find_paths(graph, "A", "G")
+paths = find_paths(graph, "A", "H")
 
 for path in paths:
     print_seq(graph, path)
